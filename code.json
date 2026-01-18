@@ -1,0 +1,76 @@
+{
+  "name": "n8n-roas-automation",
+  "nodes": [
+    {
+      "id": "google_sheets_roas",
+      "name": "Get ROAS Data",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [300, 200],
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "",
+          "mode": "list"
+        }
+      }
+    },
+
+    {
+      "id": "python_data_cleaner",
+      "name": "Clean & Parse ROAS Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 200],
+      "parameters": {
+        "language": "pythonNative",
+        "pythonCode": "# Collect rows\nall_rows = [item.get('json', item) for item in _items]\n\n# Helper to clean numeric values\ndef clean_float(val):\n    if val is None:\n        return None\n    if isinstance(val, (int, float)):\n        return float(val)\n    if isinstance(val, str):\n        val = val.replace('Rs', '').replace(',', '').replace('%', '').strip().lower()\n        if val in ['', '-', '#div/0!', '#value!', 'account error']:\n            return None\n        try:\n            return float(val)\n        except:\n            return None\n    return None\n\n# Parse Brand (Handler)\ndef parse_brand(text):\n    if not isinstance(text, str):\n        return text, None\n    if '(' in text and text.endswith(')'):\n        i = text.find('(')\n        return text[:i].strip(), text[i+1:-1].strip()\n    return text.strip(), None\n\n# Find definition row\nrow_28 = next((r for r in all_rows if r.get('row_number') == 28), None)\nif not row_28:\n    return [{\"success\": False, \"result\": []}]\n\nkeys = list(row_28.keys())\nconfigs = []\n\nfor i, k in enumerate(keys):\n    val = row_28.get(k)\n    if isinstance(val, str) and i + 3 < len(keys):\n        brand, handler = parse_brand(val)\n        configs.append({\n            \"brand\": brand,\n            \"handler\": handler,\n            \"spending\": k,\n            \"roas\": keys[i+1],\n            \"actual\": keys[i+2],\n            \"plan\": keys[i+3]\n        })\n\nresults = []\nfor row in all_rows:\n    if row.get('row_number', 0) < 30:\n        continue\n    record = {\"date\": row.get('col_1'), \"details\": []}\n    for c in configs:\n        data = {\n            \"brand\": c['brand'],\n            \"handler\": c['handler'],\n            \"spending\": clean_float(row.get(c['spending'])),\n            \"roas\": clean_float(row.get(c['roas'])),\n            \"actual_sale\": clean_float(row.get(c['actual'])),\n            \"plan_sale\": clean_float(row.get(c['plan']))\n        }\n        if any(data.values()):\n            record['details'].append(data)\n    if record['details']:\n        results.append(record)\n\nreturn [{\"success\": True, \"result\": results}]"
+      }
+    },
+
+    {
+      "id": "js_message_builder",
+      "name": "Build WhatsApp Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 200],
+      "parameters": {
+        "language": "javascript",
+        "jsCode": "const data = items[0].json.result || [];\nconst output = [];\n\ndata.forEach(day => {\n  day.details.forEach(item => {\n    output.push({\n      json: {\n        contact: \"\",\n        message: `📊 ROAS Report\\nBrand: ${item.brand}\\nHandler: ${item.handler}\\nSpend: ${item.spending}\\nROAS: ${item.roas}\\nActual: ${item.actual_sale}\\nPlan: ${item.plan_sale}`\n      }\n    });\n  });\n});\n\nreturn output;"
+      }
+    },
+
+    {
+      "id": "send_whatsapp",
+      "name": "Send WhatsApp Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1200, 200],
+      "parameters": {
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": {
+          "chatId": "{{ $json.contact }}",
+          "message": "{{ $json.message }}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Get ROAS Data": {
+      "main": [[{ "node": "Clean & Parse ROAS Data", "type": "main", "index": 0 }]]
+    },
+    "Clean & Parse ROAS Data": {
+      "main": [[{ "node": "Build WhatsApp Message", "type": "main", "index": 0 }]]
+    },
+    "Build WhatsApp Message": {
+      "main": [[{ "node": "Send WhatsApp Message", "type": "main", "index": 0 }]]
+    }
+  }
+}
